@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -14,11 +14,9 @@ import {
   Play,
   Bookmark,
   Trash2,
-  Globe,
   Tv,
   Film,
   Music,
-  ExternalLink,
 } from 'lucide-react-native';
 import { AppColors } from '@/constants/colors';
 import { Header } from '@/components/common/Header';
@@ -31,6 +29,20 @@ export default function StreamScreen() {
   const [streamUrl, setStreamUrl] = useState('');
   const [streamTitle, setStreamTitle] = useState('');
   const [bookmarks, setBookmarks] = useState<StreamBookmark[]>([]);
+
+  // Lazy loading pagination: max 20 items at a time
+  const PAGE_SIZE = 20;
+  const [streamLimit, setStreamLimit] = useState(PAGE_SIZE);
+
+  const visibleBookmarks = useMemo(() => {
+    return bookmarks.slice(0, streamLimit);
+  }, [bookmarks, streamLimit]);
+
+  const handleLoadMoreStreams = () => {
+    if (streamLimit < bookmarks.length) {
+      setStreamLimit(prev => Math.min(prev + PAGE_SIZE, bookmarks.length));
+    }
+  };
 
   useEffect(() => {
     loadBookmarks();
@@ -96,8 +108,13 @@ export default function StreamScreen() {
       />
 
       <FlatList
-        data={bookmarks}
+        data={visibleBookmarks}
         keyExtractor={item => item.id}
+        onEndReached={handleLoadMoreStreams}
+        onEndReachedThreshold={0.5}
+        initialNumToRender={20}
+        maxToRenderPerBatch={20}
+        windowSize={5}
         ListHeaderComponent={
           <View style={styles.inputSection}>
             <View style={styles.card}>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -93,6 +93,64 @@ export default function MusicScreen() {
       count: tracks.length,
     }));
   }, [audios]);
+
+  // Lazy loading pagination: max 20 data at a time
+  const PAGE_SIZE = 20;
+  const [trackLimit, setTrackLimit] = useState(PAGE_SIZE);
+  const [playlistLimit, setPlaylistLimit] = useState(PAGE_SIZE);
+  const [artistLimit, setArtistLimit] = useState(PAGE_SIZE);
+  const [folderLimit, setFolderLimit] = useState(PAGE_SIZE);
+
+  useEffect(() => {
+    setTrackLimit(PAGE_SIZE);
+    setPlaylistLimit(PAGE_SIZE);
+    setArtistLimit(PAGE_SIZE);
+    setFolderLimit(PAGE_SIZE);
+  }, [searchQuery, sortMode, sortOrder]);
+
+  const visibleAudios = useMemo(() => {
+    return processedAudios.slice(0, trackLimit);
+  }, [processedAudios, trackLimit]);
+
+  const handleLoadMoreTracks = () => {
+    if (trackLimit < processedAudios.length) {
+      setTrackLimit(prev => Math.min(prev + PAGE_SIZE, processedAudios.length));
+    }
+  };
+
+  const audioPlaylists = useMemo(() => {
+    return playlists.filter(p => p.type === 'audio');
+  }, [playlists]);
+
+  const visiblePlaylists = useMemo(() => {
+    return audioPlaylists.slice(0, playlistLimit);
+  }, [audioPlaylists, playlistLimit]);
+
+  const handleLoadMorePlaylists = () => {
+    if (playlistLimit < audioPlaylists.length) {
+      setPlaylistLimit(prev => Math.min(prev + PAGE_SIZE, audioPlaylists.length));
+    }
+  };
+
+  const visibleArtists = useMemo(() => {
+    return artistGroups.slice(0, artistLimit);
+  }, [artistGroups, artistLimit]);
+
+  const handleLoadMoreArtists = () => {
+    if (artistLimit < artistGroups.length) {
+      setArtistLimit(prev => Math.min(prev + PAGE_SIZE, artistGroups.length));
+    }
+  };
+
+  const visibleFolders = useMemo(() => {
+    return audioFolders.slice(0, folderLimit);
+  }, [audioFolders, folderLimit]);
+
+  const handleLoadMoreFolders = () => {
+    if (folderLimit < audioFolders.length) {
+      setFolderLimit(prev => Math.min(prev + PAGE_SIZE, audioFolders.length));
+    }
+  };
 
   const handlePlayAll = (shuffle: boolean = false) => {
     if (processedAudios.length === 0) return;
@@ -194,7 +252,7 @@ export default function MusicScreen() {
       {/* Tab Content */}
       {activeSubTab === 'tracks' && (
         <FlatList
-          data={processedAudios}
+          data={visibleAudios}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
             <AudioTrackRow
@@ -206,6 +264,11 @@ export default function MusicScreen() {
               }}
             />
           )}
+          onEndReached={handleLoadMoreTracks}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl
@@ -228,7 +291,7 @@ export default function MusicScreen() {
 
       {activeSubTab === 'playlists' && (
         <FlatList
-          data={playlists.filter(p => p.type === 'audio')}
+          data={visiblePlaylists}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
             <Pressable
@@ -249,13 +312,18 @@ export default function MusicScreen() {
               <Play size={18} color={AppColors.textSecondary} />
             </Pressable>
           )}
+          onEndReached={handleLoadMorePlaylists}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           contentContainerStyle={styles.listContent}
         />
       )}
 
       {activeSubTab === 'artists' && (
         <FlatList
-          data={artistGroups}
+          data={visibleArtists}
           keyExtractor={item => item.artist}
           renderItem={({ item }) => (
             <Pressable
@@ -275,13 +343,18 @@ export default function MusicScreen() {
               <Play size={18} color={AppColors.textSecondary} />
             </Pressable>
           )}
+          onEndReached={handleLoadMoreArtists}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           contentContainerStyle={styles.listContent}
         />
       )}
 
       {activeSubTab === 'folders' && (
         <FlatList
-          data={audioFolders}
+          data={visibleFolders}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
             <FolderCard
@@ -295,6 +368,11 @@ export default function MusicScreen() {
               }}
             />
           )}
+          onEndReached={handleLoadMoreFolders}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           contentContainerStyle={styles.listContent}
         />
       )}

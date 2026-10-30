@@ -6,23 +6,18 @@ import {
   ScrollView,
   Pressable,
   Alert,
-  FlatList,
-  Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
   Shield,
   Lock,
   Unlock,
-  KeyRound,
   Scissors,
   Music4,
   HardDrive,
   Eye,
   EyeOff,
-  Trash2,
   Play,
-  RotateCcw,
 } from 'lucide-react-native';
 import { AppColors } from '@/constants/colors';
 import { Header } from '@/components/common/Header';
@@ -49,9 +44,12 @@ export default function ToolsScreen() {
 
   const [enteredPin, setEnteredPin] = useState('');
   const [pinError, setPinError] = useState(false);
-  const [showPinModal, setShowPinModal] = useState(false);
-  const [newPinStage, setNewPinStage] = useState<'enter' | 'confirm'>('enter');
-  const [firstPin, setFirstPin] = useState('');
+
+  // Lazy loading pagination for vault: max 20 items at a time
+  const PAGE_SIZE = 20;
+  const [vaultLimit, setVaultLimit] = useState(PAGE_SIZE);
+
+  const visibleVaultItems = vaultItems.slice(0, vaultLimit);
 
   // Storage calculation
   const totalVideoSize = videos.reduce((acc, v) => acc + (v.size || 0), 0);
@@ -189,36 +187,47 @@ export default function ToolsScreen() {
           ) : (
             /* If Unlocked: Hidden files list */
             <View style={styles.vaultItemsList}>
-              {vaultItems.length > 0 ? (
-                vaultItems.map(item => (
-                  <View key={item.id} style={styles.vaultItemRow}>
-                    <Pressable
-                      style={styles.vaultItemInfo}
-                      onPress={() => handlePlayVaultItem(item)}>
-                      <Play size={18} color={AppColors.accent} />
-                      <View style={{ flex: 1, marginLeft: 10 }}>
-                        <Text style={styles.vaultItemTitle} numberOfLines={1}>
-                          {item.title}
-                        </Text>
-                        <Text style={styles.vaultItemMeta}>
-                          {formatDuration(item.duration)} • {formatFileSize(item.size)}
-                        </Text>
-                      </View>
-                    </Pressable>
+              {visibleVaultItems.length > 0 ? (
+                <>
+                  {visibleVaultItems.map(item => (
+                    <View key={item.id} style={styles.vaultItemRow}>
+                      <Pressable
+                        style={styles.vaultItemInfo}
+                        onPress={() => handlePlayVaultItem(item)}>
+                        <Play size={18} color={AppColors.accent} />
+                        <View style={{ flex: 1, marginLeft: 10 }}>
+                          <Text style={styles.vaultItemTitle} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          <Text style={styles.vaultItemMeta}>
+                            {formatDuration(item.duration)} • {formatFileSize(item.size)}
+                          </Text>
+                        </View>
+                      </Pressable>
 
+                      <Pressable
+                        style={styles.unhideBtn}
+                        onPress={() => {
+                          Alert.alert('Restore File', `Unhide "${item.title}" back to library?`, [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Restore', onPress: () => restoreFromVault(item) },
+                          ]);
+                        }}>
+                        <Eye size={16} color={AppColors.textSecondary} />
+                        <Text style={styles.unhideText}>Restore</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                  {vaultLimit < vaultItems.length && (
                     <Pressable
-                      style={styles.unhideBtn}
-                      onPress={() => {
-                        Alert.alert('Restore File', `Unhide "${item.title}" back to library?`, [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: 'Restore', onPress: () => restoreFromVault(item) },
-                        ]);
-                      }}>
-                      <Eye size={16} color={AppColors.textSecondary} />
-                      <Text style={styles.unhideText}>Restore</Text>
+                      style={styles.loadMoreBtn}
+                      onPress={() => setVaultLimit(prev => Math.min(prev + PAGE_SIZE, vaultItems.length))}>
+                      <Text style={styles.loadMoreText}>
+                        Load More ({vaultItems.length - vaultLimit} remaining)
+                      </Text>
                     </Pressable>
-                  </View>
-                ))
+                  )}
+                </>
               ) : (
                 <View style={styles.emptyVaultBox}>
                   <EyeOff size={32} color={AppColors.textMuted} />
@@ -611,5 +620,20 @@ const styles = StyleSheet.create({
   legendLabel: {
     fontSize: 12,
     color: AppColors.textSecondary,
+  },
+  loadMoreBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    marginTop: 8,
+    backgroundColor: AppColors.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+  },
+  loadMoreText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: AppColors.primary,
   },
 });

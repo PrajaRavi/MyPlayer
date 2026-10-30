@@ -183,7 +183,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
       const player = createAudioPlayer({ uri: track.uri });
       player.volume = volume;
-      player.playbackRate = playbackRate;
+      if (typeof (player as any).setPlaybackRate === 'function') {
+        (player as any).setPlaybackRate(playbackRate);
+      } else {
+        try {
+          (player as any).playbackRate = playbackRate;
+        } catch {
+          // ignore if getter-only on native platform
+        }
+      }
       player.loop = repeatModeRef.current === 'one';
 
       const sub = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
@@ -269,7 +277,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const setPlaybackRate = async (rate: number) => {
     setPlaybackRateState(rate);
     if (playerRef.current) {
-      playerRef.current.playbackRate = rate;
+      if (typeof (playerRef.current as any).setPlaybackRate === 'function') {
+        (playerRef.current as any).setPlaybackRate(rate);
+      } else {
+        try {
+          (playerRef.current as any).playbackRate = rate;
+        } catch {
+          // ignore if getter-only
+        }
+      }
     }
   };
 

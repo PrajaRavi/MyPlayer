@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -78,6 +78,37 @@ export default function VideosScreen() {
 
     return list;
   }, [videos, searchQuery, selectedFolder, sortMode, sortOrder]);
+
+  // Lazy loading pagination: max 20 items at a time
+  const PAGE_SIZE = 20;
+  const [videoLimit, setVideoLimit] = useState(PAGE_SIZE);
+  const [folderLimit, setFolderLimit] = useState(PAGE_SIZE);
+
+  // Reset pagination when search or filters change
+  useEffect(() => {
+    setVideoLimit(PAGE_SIZE);
+    setFolderLimit(PAGE_SIZE);
+  }, [searchQuery, selectedFolder, sortMode, sortOrder]);
+
+  const visibleVideos = useMemo(() => {
+    return processedVideos.slice(0, videoLimit);
+  }, [processedVideos, videoLimit]);
+
+  const handleLoadMoreVideos = () => {
+    if (videoLimit < processedVideos.length) {
+      setVideoLimit(prev => Math.min(prev + PAGE_SIZE, processedVideos.length));
+    }
+  };
+
+  const visibleFolders = useMemo(() => {
+    return videoFolders.slice(0, folderLimit);
+  }, [videoFolders, folderLimit]);
+
+  const handleLoadMoreFolders = () => {
+    if (folderLimit < videoFolders.length) {
+      setFolderLimit(prev => Math.min(prev + PAGE_SIZE, videoFolders.length));
+    }
+  };
 
   // Find most recent video with resume position for "Continue Watching" banner
   const continueWatchingItem = useMemo(() => {
@@ -188,7 +219,7 @@ export default function VideosScreen() {
       {/* Main Content */}
       {activeSubTab === 'all' || selectedFolder ? (
         <FlatList
-          data={processedVideos}
+          data={visibleVideos}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
             <MediaCard
@@ -200,6 +231,11 @@ export default function VideosScreen() {
               }}
             />
           )}
+          onEndReached={handleLoadMoreVideos}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           refreshControl={
             <RefreshControl
               refreshing={isLoading}
@@ -220,7 +256,7 @@ export default function VideosScreen() {
         />
       ) : (
         <FlatList
-          data={videoFolders}
+          data={visibleFolders}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
             <FolderCard
@@ -232,6 +268,11 @@ export default function VideosScreen() {
               }}
             />
           )}
+          onEndReached={handleLoadMoreFolders}
+          onEndReachedThreshold={0.5}
+          initialNumToRender={20}
+          maxToRenderPerBatch={20}
+          windowSize={5}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl

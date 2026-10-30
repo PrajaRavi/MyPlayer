@@ -92,10 +92,31 @@ export default function VideoPlayerScreen() {
     selectedAudioTrackIndex: 0,
   });
 
-  // expo-video player instance
-  const player = useVideoPlayer(currentVideo.uri, p => {
+  // Memoized video source with progressive/hls caching options to prevent buffering on long videos
+  const videoSource = useMemo(() => {
+    const uri = currentVideo.uri;
+    const isHls = uri.includes('.m3u8');
+    return {
+      uri,
+      useCaching: !isHls,
+      contentType: isHls ? ('hls' as const) : ('progressive' as const),
+    };
+  }, [currentVideo.uri]);
+
+  // expo-video player instance with optimized buffer and update interval
+  const player = useVideoPlayer(videoSource, p => {
     p.loop = false;
-    p.timeUpdateEventInterval = 0.25;
+    p.timeUpdateEventInterval = 0.5; // Reduced re-render overhead from 0.25 to 0.5s
+    try {
+      p.bufferOptions = {
+        preferredForwardBufferDuration: 60, // buffer 60s ahead for long video stability
+        minBufferForPlayback: 2.0,          // resume immediately once 2s is buffered
+        prioritizeTimeOverSizeThreshold: true,
+        waitsToMinimizeStalling: true,
+      };
+    } catch {
+      // safe fallback if not supported on platform
+    }
     p.play();
   });
 
@@ -138,6 +159,11 @@ export default function VideoPlayerScreen() {
   const lastTapRef = useRef<number>(0);
   const currentVolumeRef = useRef<number>(1.0);
   const currentBrightnessRef = useRef<number>(0.7);
+  const initialGestureXRef = useRef<number>(0);
+  const initialGestureYRef = useRef<number>(0);
+  const initialBrightnessRef = useRef<number>(0.7);
+  const initialVolumeRef = useRef<number>(1.0);
+  const gestureTypeRef = useRef<'vertical' | 'horizontal' | null>(null);
   const isLandscapeRef = useRef<boolean>(false);
   const isLockedRef = useRef(isLocked);
   const positionRef = useRef(position);
@@ -312,7 +338,7 @@ export default function VideoPlayerScreen() {
     return 'contain';
   };
 
-  // --- Gesture Handling (PLAYit / MX Player style) ---
+  // --- Gesture Handling (Stepped discrete levels of 10: 10%, 20%, 30%...) ---
   const panResponder = useMemo(
     () =>
       PanResponder.create({
@@ -324,8 +350,14 @@ export default function VideoPlayerScreen() {
           if (isLockedRef.current) return;
 
           const now = Date.now();
-          const { pageX } = evt.nativeEvent;
+          const { pageX, pageY } = evt.nativeEvent;
           const screenWidth = Dimensions.get('window').width;
+
+          initialGestureXRef.current = pageX;
+          initialGestureYRef.current = pageY;
+          initialBrightnessRef.current = currentBrightnessRef.current;
+          initialVolumeRef.current = currentVolumeRef.current;
+          gestureTypeRef.current = null;
 
           // Double tap check (< 300ms)
           if (now - lastTapRef.current < 300) {
@@ -348,14 +380,21 @@ export default function VideoPlayerScreen() {
         onPanResponderMove: (evt, gesture) => {
           if (isLockedRef.current) return;
           const screenWidth = Dimensions.get('window').width;
-          const screenHeight = Dimensions.get('window').height;
-          const startX = evt.nativeEvent.pageX - gesture.dx;
+
+          // Lock gesture mode to avoid diagonal accidental inputs
+          if (!gestureTypeRef.current) {
+            if (Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 15) {
+              gestureTypeRef.current = 'horizontal';
+            } else if (Math.abs(gesture.dy) > 10) {
+              gestureTypeRef.current = 'vertical';
+            }
+          }
 
           // Horizontal gesture -> Fast Seek
-          if (Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 20) {
+          if (gestureTypeRef.current === 'horizontal') {
             const dur = durationRef.current;
             const pos = positionRef.current;
-            const seekSensFactor = dur > 600 ? 1.0 : 0.4;
+            const seekSensFactor = dur > 600 ? 0.8 : 0.4;
             const diffSeconds = gesture.dx * seekSensFactor;
             const targetTime = Math.max(0, Math.min(dur, pos + diffSeconds));
             setSeekHUD({
@@ -367,23 +406,43 @@ export default function VideoPlayerScreen() {
             return;
           }
 
-          // Vertical gesture on Left half -> Brightness
-          if (startX < screenWidth * 0.5) {
-            const delta = -gesture.dy / screenHeight;
-            const newBright = Math.max(0, Math.min(1, currentBrightnessRef.current + delta));
-            setBrightnessHUD({ visible: true, value: newBright });
-            if (Platform.OS !== 'web') {
-              Brightness.setBrightnessAsync(newBright).catch(() => {});
+          // Vertical gesture -> Stepped level 10 (10%, 20%, 30%...)
+          if (gestureTypeRef.current === 'vertical') {
+            // Moving finger UP (-gesture.dy > 0) increases value
+            // Moving finger DOWN (-gesture.dy < 0) decreases value
+            const PIXELS_PER_STEP = 26; // 26px of swipe per 10% increment
+            const stepDelta = Math.trunc((-gesture.dy) / PIXELS_PER_STEP);
+
+            if (initialGestureXRef.current < screenWidth * 0.5) {
+              // Left side of view: Brightness control
+              const base = Math.round(initialBrightnessRef.current * 10) / 10;
+              const stepped = Math.max(0, Math.min(1.0, base + stepDelta * 0.1));
+              const roundedBright = Math.round(stepped * 10) / 10; // 0.0, 0.1, 0.2 ... 1.0
+
+              if (currentBrightnessRef.current !== roundedBright || !brightnessHUD?.visible) {
+                currentBrightnessRef.current = roundedBright;
+                setBrightnessHUD({ visible: true, value: roundedBright });
+                if (Platform.OS !== 'web') {
+                  Brightness.setBrightnessAsync(roundedBright).catch(() => {});
+                }
+              }
+            } else {
+              // Right side of view: Volume control
+              const base = Math.round(initialVolumeRef.current * 10) / 10;
+              // Allows audio boost up to 2.0 (200%) in steps of 0.1 (10%)
+              const stepped = Math.max(0, Math.min(2.0, base + stepDelta * 0.1));
+              const roundedVol = Math.round(stepped * 10) / 10; // 0.0, 0.1, 0.2 ... 2.0
+
+              if (currentVolumeRef.current !== roundedVol || !volumeHUD?.visible) {
+                currentVolumeRef.current = roundedVol;
+                setVolumeHUD({ visible: true, value: roundedVol });
+                player.volume = Math.min(1.0, roundedVol);
+              }
             }
-          } else {
-            // Vertical gesture on Right half -> Volume & Boost
-            const delta = -gesture.dy / screenHeight;
-            const newVol = Math.max(0, Math.min(2.0, currentVolumeRef.current + delta * 2));
-            setVolumeHUD({ visible: true, value: newVol });
-            player.volume = Math.min(1.0, newVol);
           }
         },
         onPanResponderRelease: (_, gesture) => {
+          gestureTypeRef.current = null;
           if (isLockedRef.current) {
             setShowControls(prev => !prev);
             return;
@@ -395,15 +454,13 @@ export default function VideoPlayerScreen() {
             setSeekHUD(null);
           }
 
-          // Commit volume & brightness values
+          // Dismiss HUDs after 800ms
           if (volumeHUD) {
-            currentVolumeRef.current = volumeHUD.value;
             if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
             hudTimeoutRef.current = setTimeout(() => setVolumeHUD(null), 800);
           }
 
           if (brightnessHUD) {
-            currentBrightnessRef.current = brightnessHUD.value;
             if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
             hudTimeoutRef.current = setTimeout(() => setBrightnessHUD(null), 800);
           }
