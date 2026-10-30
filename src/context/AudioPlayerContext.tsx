@@ -1,5 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { createAudioPlayer, setAudioModeAsync, AudioPlayer, AudioStatus } from 'expo-audio';
+import {
+  createAudioPlayer,
+  setAudioModeAsync,
+  requestNotificationPermissionsAsync,
+  AudioPlayer,
+  AudioStatus,
+} from 'expo-audio';
 import { MediaItem, AudioRepeatMode, EqualizerPreset } from '@/types/media';
 import { EQUALIZER_PRESETS } from '@/constants/demoMedia';
 import { parseLrcLyrics, getCurrentLyricsIndex } from '@/services/lyricsParser';
@@ -83,13 +89,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     positionRef.current = position;
   }, [position]);
 
-  // Setup background audio mode
+  // Setup background audio mode & notification controls
   useEffect(() => {
     setAudioModeAsync({
       playsInSilentMode: true,
       shouldPlayInBackground: true,
-      interruptionMode: 'duckOthers',
+      interruptionMode: 'doNotMix',
     }).catch(e => console.warn('Audio mode error', e));
+
+    requestNotificationPermissionsAsync().catch(e => console.warn('Notification permission error', e));
 
     return () => {
       if (statusSubscriptionRef.current) {
@@ -97,6 +105,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         statusSubscriptionRef.current = null;
       }
       if (playerRef.current) {
+        try {
+          if (typeof (playerRef.current as any).clearLockScreenControls === 'function') {
+            (playerRef.current as any).clearLockScreenControls();
+          }
+        } catch {}
         playerRef.current.remove();
         playerRef.current = null;
       }
@@ -158,13 +171,22 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const playTrack = async (track: MediaItem, newQueue?: MediaItem[]) => {
     try {
+      // First pause and tear down any running player
+      if (playerRef.current) {
+        try {
+          playerRef.current.pause();
+        } catch {}
+        try {
+          if (typeof (playerRef.current as any).clearLockScreenControls === 'function') {
+            (playerRef.current as any).clearLockScreenControls();
+          }
+        } catch {}
+        playerRef.current.remove();
+        playerRef.current = null;
+      }
       if (statusSubscriptionRef.current) {
         statusSubscriptionRef.current.remove();
         statusSubscriptionRef.current = null;
-      }
-      if (playerRef.current) {
-        playerRef.current.remove();
-        playerRef.current = null;
       }
 
       setCurrentTrack(track);
@@ -179,6 +201,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         targetQueue = [track];
         setQueue(targetQueue);
         setQueueIndex(0);
+      } else {
+        const idx = targetQueue.findIndex(item => item.id === track.id);
+        if (idx !== -1) setQueueIndex(idx);
       }
 
       const player = createAudioPlayer({ uri: track.uri });
@@ -193,6 +218,31 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         }
       }
       player.loop = repeatModeRef.current === 'one';
+
+      // Setup lock screen & notification controls (seek bar, previous, next, play/pause)
+      try {
+        if (typeof (player as any).setActiveForLockScreen === 'function') {
+          (player as any).setActiveForLockScreen(
+            true,
+            {
+              title: track.title,
+              artist: track.artist || 'Unknown Artist',
+              album: track.albumTitle || 'OwnPlayer',
+              artworkUrl: track.thumbnailUri || undefined,
+            },
+            {
+              showNextTrack: true,
+              showPreviousTrack: true,
+              showSeekForward: true,
+              showSeekBackward: true,
+              seekForwardIntervalSeconds: 10,
+              seekBackwardIntervalSeconds: 10,
+            }
+          );
+        }
+      } catch (err) {
+        console.warn('Notification controls setup error', err);
+      }
 
       const sub = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
         setIsPlaying(status.playing);
@@ -245,6 +295,16 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const playNext = async () => {
     const currentQueue = queueRef.current;
     if (currentQueue.length === 0) return;
+
+    // 1. FIRST PAUSE the current playing song
+    if (playerRef.current) {
+      try {
+        playerRef.current.pause();
+        setIsPlaying(false);
+      } catch {}
+    }
+
+    // 2. Determine next track and play
     if (repeatModeRef.current === 'shuffle' && currentQueue.length > 1) {
       const nextIdx = Math.floor(Math.random() * currentQueue.length);
       await playTrack(currentQueue[nextIdx], currentQueue);
@@ -257,9 +317,18 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const playPrevious = async () => {
     const currentQueue = queueRef.current;
     if (currentQueue.length === 0) return;
+
+    // 1. FIRST PAUSE the current playing song
+    if (playerRef.current) {
+      try {
+        playerRef.current.pause();
+        setIsPlaying(false);
+      } catch {}
+    }
+
     // If played more than 3s, restart current song
     if (positionRef.current > 3 && playerRef.current) {
-      await playerRef.current.seekTo(0);
+      await playTrack(currentQueue[queueIndexRef.current], currentQueue);
       return;
     }
     const prevIdx = (queueIndexRef.current - 1 + currentQueue.length) % currentQueue.length;
@@ -310,6 +379,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       statusSubscriptionRef.current = null;
     }
     if (playerRef.current) {
+      try {
+        if (typeof (playerRef.current as any).clearLockScreenControls === 'function') {
+          (playerRef.current as any).clearLockScreenControls();
+        }
+      } catch {}
       playerRef.current.pause();
       playerRef.current.remove();
       playerRef.current = null;

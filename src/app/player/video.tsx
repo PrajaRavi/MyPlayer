@@ -106,13 +106,13 @@ export default function VideoPlayerScreen() {
   // expo-video player instance with optimized buffer and update interval
   const player = useVideoPlayer(videoSource, p => {
     p.loop = false;
-    p.timeUpdateEventInterval = 0.5; // Reduced re-render overhead from 0.25 to 0.5s
+    p.timeUpdateEventInterval = 0.5; // Reduced re-render overhead
     try {
       p.bufferOptions = {
-        preferredForwardBufferDuration: 60, // buffer 60s ahead for long video stability
-        minBufferForPlayback: 2.0,          // resume immediately once 2s is buffered
+        preferredForwardBufferDuration: 30, // 30s forward buffer keeps network chunks small and fast
+        minBufferForPlayback: 0.5,          // resume immediately once 0.5s is buffered (prevents long stalls on large seeks)
         prioritizeTimeOverSizeThreshold: true,
-        waitsToMinimizeStalling: true,
+        waitsToMinimizeStalling: false,     // don't stall seeking to wait for full forward buffer
       };
     } catch {
       // safe fallback if not supported on platform
@@ -125,6 +125,15 @@ export default function VideoPlayerScreen() {
   const [brightnessHUD, setBrightnessHUD] = useState<{ visible: boolean; value: number } | null>(null);
   const [seekHUD, setSeekHUD] = useState<{ visible: boolean; diffSeconds: number; targetTime: number; duration: number } | null>(null);
   const [doubleTapHUD, setDoubleTapHUD] = useState<{ visible: boolean; type: 'rewind' | 'forward'; seconds: number } | null>(null);
+
+  // Scrubber dragging state
+  const [scrubTrackWidth, setScrubTrackWidth] = useState(0);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubPosition, setScrubPosition] = useState(0);
+  const scrubTrackWidthRef = useRef(0);
+  const isScrubbingRef = useRef(false);
+  const scrubPositionRef = useRef(0);
+  const wasPlayingBeforeScrubRef = useRef(false);
 
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -168,6 +177,12 @@ export default function VideoPlayerScreen() {
   const isLockedRef = useRef(isLocked);
   const positionRef = useRef(position);
   const durationRef = useRef(duration);
+  const lastReportedStepRef = useRef<number>(-1);
+  const seekTargetRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    scrubTrackWidthRef.current = scrubTrackWidth;
+  }, [scrubTrackWidth]);
 
   useEffect(() => {
     isLockedRef.current = isLocked;
@@ -338,7 +353,52 @@ export default function VideoPlayerScreen() {
     return 'contain';
   };
 
-  // --- Gesture Handling (Stepped discrete levels of 10: 10%, 20%, 30%...) ---
+  // --- Scrubber PanResponder with Drag Tracking and No Lag ---
+  const scrubberPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: evt => {
+          resetControlsTimer();
+          wasPlayingBeforeScrubRef.current = isPlaying;
+          isScrubbingRef.current = true;
+          setIsScrubbing(true);
+
+          const width = scrubTrackWidthRef.current || 280;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          scrubPositionRef.current = target;
+          setScrubPosition(target);
+        },
+        onPanResponderMove: evt => {
+          resetControlsTimer();
+          const width = scrubTrackWidthRef.current || 280;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          scrubPositionRef.current = target;
+          setScrubPosition(target);
+        },
+        onPanResponderRelease: evt => {
+          const width = scrubTrackWidthRef.current || 280;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          player.currentTime = target;
+          if (wasPlayingBeforeScrubRef.current) {
+            player.play();
+          }
+          setIsScrubbing(false);
+          isScrubbingRef.current = false;
+          resetControlsTimer();
+        },
+      }),
+    [player, isPlaying, resetControlsTimer]
+  );
+
+  // --- Main Gesture Handling (Stepped discrete levels of 10%: 10, 20, 30...) ---
   const panResponder = useMemo(
     () =>
       PanResponder.create({
@@ -357,6 +417,8 @@ export default function VideoPlayerScreen() {
           initialGestureYRef.current = pageY;
           initialBrightnessRef.current = currentBrightnessRef.current;
           initialVolumeRef.current = currentVolumeRef.current;
+          lastReportedStepRef.current = -1;
+          seekTargetRef.current = null;
           gestureTypeRef.current = null;
 
           // Double tap check (< 300ms)
@@ -385,7 +447,7 @@ export default function VideoPlayerScreen() {
           if (!gestureTypeRef.current) {
             if (Math.abs(gesture.dx) > Math.abs(gesture.dy) && Math.abs(gesture.dx) > 15) {
               gestureTypeRef.current = 'horizontal';
-            } else if (Math.abs(gesture.dy) > 10) {
+            } else if (Math.abs(gesture.dy) > 12) {
               gestureTypeRef.current = 'vertical';
             }
           }
@@ -397,6 +459,7 @@ export default function VideoPlayerScreen() {
             const seekSensFactor = dur > 600 ? 0.8 : 0.4;
             const diffSeconds = gesture.dx * seekSensFactor;
             const targetTime = Math.max(0, Math.min(dur, pos + diffSeconds));
+            seekTargetRef.current = targetTime;
             setSeekHUD({
               visible: true,
               diffSeconds,
@@ -406,36 +469,39 @@ export default function VideoPlayerScreen() {
             return;
           }
 
-          // Vertical gesture -> Stepped level 10 (10%, 20%, 30%...)
+          // Vertical gesture -> Stepped levels of 10% (10, 20, 30...)
           if (gestureTypeRef.current === 'vertical') {
             // Moving finger UP (-gesture.dy > 0) increases value
             // Moving finger DOWN (-gesture.dy < 0) decreases value
-            const PIXELS_PER_STEP = 26; // 26px of swipe per 10% increment
+            const PIXELS_PER_STEP = 24; // 24px of swipe per 10% step
             const stepDelta = Math.trunc((-gesture.dy) / PIXELS_PER_STEP);
 
             if (initialGestureXRef.current < screenWidth * 0.5) {
-              // Left side of view: Brightness control
+              // Left side of view: Brightness control (0.0 to 1.0 in 0.1 steps)
               const base = Math.round(initialBrightnessRef.current * 10) / 10;
               const stepped = Math.max(0, Math.min(1.0, base + stepDelta * 0.1));
-              const roundedBright = Math.round(stepped * 10) / 10; // 0.0, 0.1, 0.2 ... 1.0
+              const roundedBright = Math.round(stepped * 10) / 10;
 
-              if (currentBrightnessRef.current !== roundedBright || !brightnessHUD?.visible) {
+              if (lastReportedStepRef.current !== roundedBright) {
+                lastReportedStepRef.current = roundedBright;
                 currentBrightnessRef.current = roundedBright;
                 setBrightnessHUD({ visible: true, value: roundedBright });
+                if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
                 if (Platform.OS !== 'web') {
                   Brightness.setBrightnessAsync(roundedBright).catch(() => {});
                 }
               }
             } else {
-              // Right side of view: Volume control
+              // Right side of view: Volume control (0.0 to 2.0 in 0.1 steps)
               const base = Math.round(initialVolumeRef.current * 10) / 10;
-              // Allows audio boost up to 2.0 (200%) in steps of 0.1 (10%)
               const stepped = Math.max(0, Math.min(2.0, base + stepDelta * 0.1));
-              const roundedVol = Math.round(stepped * 10) / 10; // 0.0, 0.1, 0.2 ... 2.0
+              const roundedVol = Math.round(stepped * 10) / 10;
 
-              if (currentVolumeRef.current !== roundedVol || !volumeHUD?.visible) {
+              if (lastReportedStepRef.current !== roundedVol) {
+                lastReportedStepRef.current = roundedVol;
                 currentVolumeRef.current = roundedVol;
                 setVolumeHUD({ visible: true, value: roundedVol });
+                if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
                 player.volume = Math.min(1.0, roundedVol);
               }
             }
@@ -443,35 +509,35 @@ export default function VideoPlayerScreen() {
         },
         onPanResponderRelease: (_, gesture) => {
           gestureTypeRef.current = null;
+          lastReportedStepRef.current = -1;
+
           if (isLockedRef.current) {
             setShowControls(prev => !prev);
             return;
           }
 
-          // Apply fast seek if seek HUD was active
-          if (seekHUD && seekHUD.visible) {
-            player.currentTime = seekHUD.targetTime;
+          // Apply fast seek if horizontal seek HUD was active
+          if (seekTargetRef.current !== null) {
+            player.currentTime = seekTargetRef.current;
+            seekTargetRef.current = null;
             setSeekHUD(null);
           }
 
           // Dismiss HUDs after 800ms
-          if (volumeHUD) {
-            if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
-            hudTimeoutRef.current = setTimeout(() => setVolumeHUD(null), 800);
-          }
-
-          if (brightnessHUD) {
-            if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
-            hudTimeoutRef.current = setTimeout(() => setBrightnessHUD(null), 800);
-          }
+          if (hudTimeoutRef.current) clearTimeout(hudTimeoutRef.current);
+          hudTimeoutRef.current = setTimeout(() => {
+            setVolumeHUD(null);
+            setBrightnessHUD(null);
+            setSeekHUD(null);
+          }, 800);
 
           // If tap without drag, toggle controls
-          if (Math.abs(gesture.dx) < 5 && Math.abs(gesture.dy) < 5) {
+          if (Math.abs(gesture.dx) < 6 && Math.abs(gesture.dy) < 6) {
             setShowControls(prev => !prev);
           }
         },
       }),
-    [player, seekHUD, volumeHUD, brightnessHUD]
+    [player]
   );
 
   // External subtitle file loader
@@ -655,28 +721,51 @@ export default function VideoPlayerScreen() {
 
           {/* Bottom Bar Controls */}
           <View style={styles.bottomBar}>
-            {/* Scrubber */}
+            {/* Scrubber with Draggable Filled Circle Button */}
             <View style={styles.scrubberRow}>
-              <Text style={styles.timeLabel}>{formatDuration(position)}</Text>
+              <Text style={styles.timeLabel}>
+                {formatDuration(isScrubbing ? scrubPosition : position)}
+              </Text>
 
-              <Pressable
+              <View
                 style={styles.scrubTrackTouch}
-                onPress={evt => {
-                  const { locationX } = evt.nativeEvent;
-                  const ratio = Math.max(0, Math.min(1, locationX / 240));
-                  player.currentTime = ratio * duration;
-                }}>
+                onLayout={evt => setScrubTrackWidth(evt.nativeEvent.layout.width)}
+                {...scrubberPanResponder.panHandlers}>
                 <View style={styles.scrubTrack}>
                   <View
                     style={[
                       styles.scrubFill,
                       {
-                        width: `${duration > 0 ? (position / duration) * 100 : 0}%`,
+                        width: `${
+                          duration > 0
+                            ? ((isScrubbing ? scrubPosition : position) / duration) * 100
+                            : 0
+                        }%`,
                       },
                     ]}
                   />
+                  {/* Filled Circle Button on front of progress bar */}
+                  <View
+                    style={[
+                      styles.scrubThumb,
+                      {
+                        left: `${
+                          duration > 0
+                            ? Math.min(
+                                100,
+                                Math.max(
+                                  0,
+                                  ((isScrubbing ? scrubPosition : position) / duration) * 100
+                                )
+                              )
+                            : 0
+                        }%`,
+                      },
+                    ]}>
+                    <View style={styles.scrubThumbInner} />
+                  </View>
                 </View>
-              </Pressable>
+              </View>
 
               <Text style={styles.timeLabel}>{formatDuration(duration)}</Text>
             </View>
@@ -1001,6 +1090,28 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: AppColors.primary,
     borderRadius: 2,
+  },
+  scrubThumb: {
+    position: 'absolute',
+    top: -7,
+    marginLeft: -9,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: AppColors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: AppColors.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.9,
+    shadowRadius: 5,
+  },
+  scrubThumbInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FFFFFF',
   },
   bottomActionsRow: {
     flexDirection: 'row',

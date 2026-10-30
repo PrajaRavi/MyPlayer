@@ -1,14 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Modal,
   Pressable,
-  Image,
   ScrollView,
-  Animated,
-  Easing,
   PanResponder,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -28,13 +25,13 @@ import {
   ListMusic,
   Gauge,
   Music,
-  Trash2,
 } from 'lucide-react-native';
 import { useAudioPlayer } from '@/context/AudioPlayerContext';
 import { useMediaContext } from '@/context/MediaContext';
 import { AppColors } from '@/constants/colors';
 import { formatDuration } from '@/utils/formatters';
 import { EQUALIZER_PRESETS } from '@/constants/demoMedia';
+import { CircularVisualizer } from './CircularVisualizer';
 
 export const FullAudioPlayerModal: React.FC = () => {
   const {
@@ -71,97 +68,58 @@ export const FullAudioPlayerModal: React.FC = () => {
   const [showQueueModal, setShowQueueModal] = useState(false);
   const [showSpeedModal, setShowSpeedModal] = useState(false);
 
-  // Animated visualizer bars
-  const anim1 = useRef(new Animated.Value(15)).current;
-  const anim2 = useRef(new Animated.Value(28)).current;
-  const anim3 = useRef(new Animated.Value(20)).current;
-  const anim4 = useRef(new Animated.Value(32)).current;
-  const anim5 = useRef(new Animated.Value(12)).current;
-
-  // Vinyl rotation animation
-  const rotateAnim = useRef(new Animated.Value(0)).current;
+  // Scrubber drag & interactive thumb tracking
+  const [trackWidth, setTrackWidth] = useState(0);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubPosition, setScrubPosition] = useState(0);
+  const trackWidthRef = useRef(0);
+  const durationRef = useRef(duration);
 
   useEffect(() => {
-    let loop: Animated.CompositeAnimation | null = null;
-    if (isPlaying) {
-      loop = Animated.loop(
-        Animated.timing(rotateAnim, {
-          toValue: 1,
-          duration: 12000,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      );
-      loop.start();
-    } else {
-      rotateAnim.stopAnimation();
-    }
-    return () => {
-      if (loop) loop.stop();
-    };
-  }, [isPlaying]);
+    trackWidthRef.current = trackWidth;
+  }, [trackWidth]);
 
-  // Visualizer bouncing
   useEffect(() => {
-    if (isPlaying) {
-      const createBounce = (animVal: Animated.Value, min: number, max: number, durationMs: number) => {
-        return Animated.loop(
-          Animated.sequence([
-            Animated.timing(animVal, {
-              toValue: max,
-              duration: durationMs,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: false,
-            }),
-            Animated.timing(animVal, {
-              toValue: min,
-              duration: durationMs,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: false,
-            }),
-          ])
-        );
-      };
+    durationRef.current = duration;
+  }, [duration]);
 
-      const b1 = createBounce(anim1, 10, 36, 450);
-      const b2 = createBounce(anim2, 14, 42, 380);
-      const b3 = createBounce(anim3, 8, 38, 520);
-      const b4 = createBounce(anim4, 12, 40, 410);
-      const b5 = createBounce(anim5, 6, 32, 490);
-
-      b1.start();
-      b2.start();
-      b3.start();
-      b4.start();
-      b5.start();
-
-      return () => {
-        b1.stop();
-        b2.stop();
-        b3.stop();
-        b4.stop();
-        b5.stop();
-      };
-    }
-  }, [isPlaying]);
+  const scrubberPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: evt => {
+          setIsScrubbing(true);
+          const width = trackWidthRef.current || 300;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          setScrubPosition(target);
+        },
+        onPanResponderMove: (evt, gesture) => {
+          const width = trackWidthRef.current || 300;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          setScrubPosition(target);
+        },
+        onPanResponderRelease: evt => {
+          const width = trackWidthRef.current || 300;
+          const { locationX } = evt.nativeEvent;
+          const ratio = Math.max(0, Math.min(1, locationX / width));
+          const target = ratio * durationRef.current;
+          seekTo(target);
+          setIsScrubbing(false);
+        },
+      }),
+    [seekTo]
+  );
 
   if (!currentTrack) return null;
 
   const favorite = isFavorite(currentTrack.id);
-  const spin = rotateAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
-  const progressPercent = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
-
-  // Scrub bar interaction
-  const handleSeekTouch = (evt: any) => {
-    const { locationX } = evt.nativeEvent;
-    // Assuming 300px scrub width approximate
-    const ratio = Math.max(0, Math.min(1, locationX / 300));
-    seekTo(ratio * duration);
-  };
+  const displayPos = isScrubbing ? scrubPosition : position;
+  const progressPercent = duration > 0 ? Math.min(100, (displayPos / duration) * 100) : 0;
 
   return (
     <Modal
@@ -216,40 +174,13 @@ export const FullAudioPlayerModal: React.FC = () => {
         {/* Body View */}
         {activeTab === 'cover' ? (
           <View style={styles.coverViewContainer}>
-            {/* Vinyl record representation */}
-            <View style={styles.artDiscWrapper}>
-              <Animated.View
-                style={[
-                  styles.vinylDisc,
-                  { transform: [{ rotate: spin }] },
-                ]}>
-                {currentTrack.thumbnailUri ? (
-                  <Image
-                    source={{ uri: currentTrack.thumbnailUri }}
-                    style={styles.vinylArtImage}
-                  />
-                ) : (
-                  <View style={styles.placeholderDiscCenter}>
-                    <Music size={40} color={AppColors.primary} />
-                  </View>
-                )}
-                {/* Center spindle hole */}
-                <View style={styles.centerHole} />
-              </Animated.View>
-            </View>
-
-            {/* Audio Visualizer Bouncing Bars */}
-            <View style={styles.visualizerRow}>
-              {[anim1, anim2, anim3, anim4, anim5, anim3, anim2, anim4].map((anim, idx) => (
-                <Animated.View
-                  key={idx}
-                  style={[
-                    styles.visualizerBar,
-                    { height: anim },
-                  ]}
-                />
-              ))}
-            </View>
+            <CircularVisualizer
+              isPlaying={isPlaying}
+              position={position}
+              thumbnailUri={currentTrack.thumbnailUri}
+              size={290}
+              barCount={48}
+            />
           </View>
         ) : (
           <ScrollView
@@ -307,18 +238,25 @@ export const FullAudioPlayerModal: React.FC = () => {
           </Pressable>
         </View>
 
-        {/* Interactive Scrub Bar */}
+        {/* Interactive Scrub Bar with Filled Circle Thumb Button */}
         <View style={styles.scrubberSection}>
-          <Pressable
+          <View
             style={styles.scrubTouchArea}
-            onPress={handleSeekTouch}>
+            onLayout={e => setTrackWidth(e.nativeEvent.layout.width)}
+            {...scrubberPanResponder.panHandlers}>
             <View style={styles.scrubTrackBg}>
               <View style={[styles.scrubTrackFill, { width: `${progressPercent}%` }]} />
-              <View style={[styles.scrubThumb, { left: `${Math.max(0, progressPercent - 2)}%` }]} />
+              <View
+                style={[
+                  styles.scrubThumb,
+                  { left: `${progressPercent}%` },
+                ]}>
+                <View style={styles.scrubThumbInner} />
+              </View>
             </View>
-          </Pressable>
+          </View>
           <View style={styles.timeRow}>
-            <Text style={styles.timeText}>{formatDuration(position)}</Text>
+            <Text style={styles.timeText}>{formatDuration(displayPos)}</Text>
             <Text style={styles.timeText}>{formatDuration(duration)}</Text>
           </View>
         </View>
@@ -752,13 +690,25 @@ const styles = StyleSheet.create({
   },
   scrubThumb: {
     position: 'absolute',
-    top: -5,
-    width: 15,
-    height: 15,
-    borderRadius: 8,
-    backgroundColor: '#FFF',
-    borderWidth: 2,
-    borderColor: AppColors.primary,
+    top: -6,
+    marginLeft: -9,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: AppColors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 6,
+    shadowColor: AppColors.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+  },
+  scrubThumbInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FFFFFF',
   },
   timeRow: {
     flexDirection: 'row',
